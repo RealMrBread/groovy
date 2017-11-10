@@ -1,3 +1,2 @@
-# fileName : README.md
-# author   : Manuel Gonzalez Pan
-# mail     : manuel.gonzalez.pan@ericsson.com
+     author : mgonzalezpan@gmail.com
+description : groovy to automate deployments of an aplication running on top Weblogic server 
