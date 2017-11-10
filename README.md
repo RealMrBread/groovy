@@ -1,2 +1,3 @@
-# groovy
-groovy code to automate telecom app on top of a weblogic managed server
+# fileName : README.md
+# author   : Manuel Gonzalez Pan
+# mail     : manuel.gonzalez.pan@ericsson.com

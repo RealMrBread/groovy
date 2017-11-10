@@ -1,0 +1,181 @@
+import static groovy.io.FileType.FILES
+import groovy.io.FileType
+import groovy.xml.StreamingMarkupBuilder
+import javax.crypto.Cipher
+import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.DESedeKeySpec
+import groovy.xml.StreamingMarkupBuilder;
+import com.jcraft.jsch.*
+
+allprojects {
+  OPERATING_SYSTEM = (System.getProperty("os.name").toLowerCase().contains("windows")) ? "WINDOWS" : "UNIX"
+  CMD_EXT = (OPERATING_SYSTEM == "WINDOWS") ? ".cmd" : ".sh"
+  CW_BIN_PATH = "${CWOC_PATH}/designer/env" 
+}
+
+task startWls << {
+     doStartWls "${WL_MANAGED_NAME}" 
+}
+
+task stopWls << {
+     doStopWls "${WL_MANAGED_NAME}" 
+}
+
+apply plugin: 'java'
+
+task transferFile << {
+	def sourceFile = new File("${CATALOG_DIR_SOURCE}").listFiles()?.sort { -it.lastModified() }?.head()
+	def fileName = sourceFile.getName()
+	println "importing " + sourceFile.getName()
+	javaexec { 
+		main="-jar"; 
+		args = [			
+			   "./secureFileTransfer.jar"
+			   ]
+		systemProperty 'sftpPort', "${SFTP_PORT}"
+		systemProperty 'targetHost', "${APP_HOST}"
+		systemProperty 'sftpUsername', "${SFTP_USERNAME}"
+		systemProperty 'sftpPassword', "${decryptPassword(SFTP_PASSWORD)}"
+		systemProperty 'sourceFile', "${CATALOG_DIR_SOURCE}/"+fileName
+		systemProperty 'targetDir', "${CATALOG_DIR_TARGET}"
+	}
+}
+
+task doCleanUpCatalog << {    
+    doSqlPlus "${DB_SCRIPTS_DIR}/ECM_CleanUp.sql", DB_USER, decryptPassword(DB_PASSWORD), DB_HOST, DB_PORT.toInteger(), DB_SID, null
+}
+
+task doActivateCatalog << {
+    doSqlPlus "${DB_SCRIPTS_DIR}/ECM_ACT.sql", DB_USER, decryptPassword(DB_PASSWORD), DB_HOST, DB_PORT.toInteger(), DB_SID, null
+}
+
+task importCatalog <<{
+	def url = "http://${APP_HOST}:${APP_PORT}/${APP_NAME}"
+	def importFile = new File("${CATALOG_DIR_SOURCE}").listFiles()?.sort { -it.lastModified() }?.head()
+	println 'importing --> ' + importFile + ' in ' + url
+	def fileName = importFile.getName()
+	println 'Starting to import catalog.....'
+	doExecute "${CW_BIN_PATH}/catalogImport${CMD_EXT}", CW_BIN_PATH, [ "username=${ECM_USER}", "password=${decryptPassword(ECM_PASSWORD)}", "server_url=" + url, "import_file=${CATALOG_DIR_TARGET}/" + fileName], ["Import summary -- Total processed:"]
+}
+
+
+void doStopWls(String managedServerName) {
+	def wlst = new ProcessBuilder("${WL_SERVER_HOME}/common/bin/wlst${CMD_EXT}").redirectErrorStream(true).start()
+	def nmPassword = project.hasProperty("WL_NM_PASSWORD") && WL_NM_PASSWORD ? WL_NM_PASSWORD : WL_PASSWORD
+	def nmUsername = project.hasProperty("WL_NM_USERNAME") && WL_NM_USERNAME ? WL_NM_USERNAME : WL_USER
+	def domainDir = "${WL_DOMAINS_HOME}/${WL_DOMAIN_NAME}"
+	def wlstCmd = "connect('${nmUsername}', '${decryptPassword(nmPassword)}', 't3://"+"${WL_MANAGED_HOST}"+":"+"${WL_MANAGED_PORT}')\n"  
+  wlstCmd <<= "shutdown('${managedServerName}', 'Server',force='true')\n"
+  wlst.withWriter { writer -> writer.write(wlstCmd.toString()) }
+  ByteArrayOutputStream out = new ByteArrayOutputStream()
+  ByteArrayOutputStream err = new ByteArrayOutputStream()
+  wlst.consumeProcessOutput(out, err)
+  wlst.waitFor()
+  if (wlst.exitValue() != 0 || out.toString("utf8").indexOf("WLSTException") > -1) {
+	  println out.toString("utf8")
+    logger.error("WLST ERROR: ${wlst.exitValue()}")
+    logger.error(err.toString("utf8"))
+  }
+  else {
+    logger.info("Exit Value: ${wlst.exitValue()}")
+	  println "WL instance killed successfully"
+  }
+}
+
+void doStartWls(String managedServerName) {
+  def wlst = "${WL_SERVER_HOME}/common/bin/wlst${CMD_EXT}".execute()
+	def nmPassword = project.hasProperty("WL_NM_PASSWORD") && WL_NM_PASSWORD ? WL_NM_PASSWORD : WL_PASSWORD
+	def nmUsername = project.hasProperty("WL_NM_USERNAME") && WL_NM_USERNAME ? WL_NM_USERNAME : WL_USER
+	def domainDir = "${WL_DOMAINS_HOME}/${WL_DOMAIN_NAME}"
+	def wlstCmd = "connect('${nmUsername}', '${decryptPassword(nmPassword)}', 't3://"+"${WL_MANAGED_HOST}"+":"+"${WL_MANAGED_PORT}')\n"  
+  wlstCmd <<= "start('${managedServerName}')\n"
+	wlstCmd <<= "disconnect()\n"
+  wlstCmd <<= "exit()\n"
+  wlst.withWriter { writer -> writer.write(wlstCmd.toString()) }
+  ByteArrayOutputStream out = new ByteArrayOutputStream()
+  ByteArrayOutputStream err = new ByteArrayOutputStream()
+  wlst.consumeProcessOutput(out, err)
+  wlst.waitFor()
+  println out.toString("utf8")
+  if (wlst.exitValue() != 0 || out.toString("utf8").indexOf("WLSTException") > -1) {
+    logger.error("WLST ERROR: ${wlst.exitValue()}")
+    logger.error(err.toString("utf8"))
+    throw new RuntimeException("Error starting WL managed server")
+  }
+  else {
+    logger.info("Exit Value: ${wlst.exitValue()}")
+	  println "WL instance started successfully"
+  }
+}
+
+task encryptPasswordFromConsole << {
+  Console console = System.console()
+  def plaintext = console.readLine "\nEnter plaintext password: "
+  console.println "Encrypted password: ${encryptPassword(plaintext)}\n"
+}
+
+task decryptPasswordFromConsole << {
+  Console console = System.console()
+  def encrText = console.readLine "\nEnter encrypted password: "
+  console.println "Decrypted password: ${decryptPassword(encrText)}\n"
+}
+
+private String encryptPassword(String password) {
+  String passwordKey = "12A583620CBDEFA49828E8FD8B8C8A83877024956252412A"  
+  return encryptText(password, passwordKey)
+}
+
+private String decryptPassword(String encryptedPassword) {
+  String passwordKey = "12A583620CBDEFA49828E8FD8B8C8A83877024956252412A"
+  return decryptText(encryptedPassword, passwordKey)
+}
+
+private String encryptText(String text, String key) {
+  DESedeKeySpec keySpec = new DESedeKeySpec(hexToBytes(key));
+  SecretKeyFactory keyFactory = SecretKeyFactory.getInstance("DESede");
+  SecretKey desKey = keyFactory.generateSecret(keySpec);
+  Cipher desCipher = Cipher.getInstance("DESede/ECB/PKCS5Padding");
+  desCipher.init(Cipher.ENCRYPT_MODE, desKey);
+  return bytesToHex(desCipher.doFinal(text.getBytes("UTF8")), -1, null);
+}
+
+private String decryptText(String encryptedText, String key) {
+  DESedeKeySpec keySpec = new DESedeKeySpec(hexToBytes(key));
+  SecretKeyFactory keyFactory = SecretKeyFactory.getInstance("DESede");
+  SecretKey desKey = keyFactory.generateSecret(keySpec);
+  Cipher desCipher = Cipher.getInstance("DESede/ECB/PKCS5Padding");
+  desCipher.init(Cipher.DECRYPT_MODE, desKey);
+  return new String(desCipher.doFinal(hexToBytes(encryptedText)), "UTF8");
+}
+
+private int hexToInt(char c) {
+  return c > '9' ? (int)c - (int)'A' + 10 : (int)c - (int)'0';
+}
+
+private byte[] hexToBytes(String hex) {
+  char[] hexChars = "0123456789ABCDEF".toCharArray();
+  byte[] bytes = new byte[hex.length() / 2];
+  for (int i = 0; i < bytes.length; i++) {
+    int v = 16 * hexToInt(hex.charAt(i * 2)) + hexToInt(hex.charAt(i * 2 + 1));
+    if (v < 0) {
+      bytes[i] = (byte)(v - (int)Byte.MAX_VALUE + 1);
+    } else {
+      bytes[i] = (byte)v;
+    }
+  }
+  return bytes;
+}
+
+private String bytesToHex(byte[] bytes, int len, StringBuilder strBuf) {
+  char[] hexChars = "0123456789ABCDEF".toCharArray();
+  if (len == -1)
+    len = bytes.length;
+  if (strBuf == null)
+    strBuf = new StringBuilder(len * 2);
+  for (int i = 0; i < len; i++) {
+    strBuf.append(hexChars[(bytes[i] & 0xf0) >> 4]);
+    strBuf.append(hexChars[bytes[i] & 0x0f]);
+  }
+  return strBuf.toString();
+}
